@@ -1,7 +1,7 @@
 new_cluster: &new_cluster
   new_cluster:
     num_workers: 3
-    spark_version: 15.3.x-cpu-ml-scala2.12
+    spark_version: 16.4.x-scala2.12
     node_type_id: i3.xlarge
     data_security_mode: "SINGLE_USER"
     custom_tags:
@@ -88,13 +88,6 @@ resources:
         git_provider: gitHub  # or gitLab, azureDevOpsServices, etc.
         git_branch: main
       
-      trigger:
-        # Trigger when PR is merged to main branch
-        file_arrival:
-          url: ${bundle.git.origin_url}
-          # This would be configured in the Databricks UI or via API
-          # to trigger on PR merge events
-      <<: *permissions
       # If you want to turn on notifications for this job, please uncomment the below code,
       # and provide a list of emails to the on_failure argument.
       #

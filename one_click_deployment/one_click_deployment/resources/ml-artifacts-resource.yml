@@ -25,4 +25,3 @@ resources:
     experiment:
       name: ${var.experiment_name}
       <<: *permissions
-      description: MLflow Experiment used to track runs for one_click_deployment project.

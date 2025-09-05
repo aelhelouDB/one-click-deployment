@@ -116,11 +116,164 @@ to clone it into your workspace and iterate.
 
 ### Testing the Pipeline
 
-1. **Run Training**: Execute the `Train.py` notebook to download and log model (weights)
-2. **Run Validation**: Execute `ModelValidation.py` to validate the model with GenAI evaluation _(optionnal)_
-3. **Run Deployment**: Execute `ModelDeployment.py` to deploy to serving endpoint
+You can test the template in several ways depending on your needs:
 
-The workflow can be triggered automatically on PR merge to main branch or run manually.
+#### 🧪 **Testing Options**
+
+**1. Local Testing (Limited)**
+For basic code validation and syntax checking:
+
+```bash
+# Navigate to the project directory
+cd one_click_deployment/one_click_deployment
+
+# Install dependencies
+pip install -r requirements.txt
+
+# Run unit tests
+pytest tests/
+
+# Validate YAML syntax
+databricks bundle validate
+```
+
+> **Note:** Local testing is limited to syntax/import validation. MLflow Unity Catalog integration and Databricks-specific features require workspace testing.
+
+**2. Databricks Workspace Testing (Recommended)**
+
+**Prerequisites Setup:**
+```bash
+# 1. Configure workspace access
+databricks configure --token --host https://e2-demo-field-eng.cloud.databricks.com
+
+# 2. Ensure Unity Catalog access with these catalogs and schemas:
+# - dev_testing_catalog.models (for test environment)
+# - production_catalog.models (for prod environment)
+```
+
+**Option A: Bundle Deployment (Automated)**
+```bash
+# Deploy to test environment
+databricks bundle deploy -t test
+
+# Run the complete workflow
+databricks bundle run model_training_job -t test
+```
+
+**Option B: Manual Notebook Execution**
+1. Upload project to Databricks Repos (via Git integration) OR use Databricks VS Extension/DB Connect and run directly on Databricks Cluster via IDE
+2. Execute notebooks individually:
+   - **Training**: Run `training/notebooks/Train.py`
+   - **Validation**: Run `validation/notebooks/ModelValidation.py` 
+   - **Deployment**: Run `deployment/model_deployment/notebooks/ModelDeployment.py`
+
+#### 🔍 **Step-by-Step Testing Guide**
+
+**Step 1: Validate Configuration**
+```bash
+# Check bundle syntax
+databricks bundle validate -t test
+
+# Deploy to test environment
+databricks bundle deploy -t test
+```
+
+**Step 2: Test Training Pipeline**
+```bash
+# Deploy and run training only
+databricks bundle deploy -t test
+databricks bundle run model_training_job -t test --job-key Train
+```
+
+**Step 3: Test Full Pipeline**
+```bash
+# Run complete workflow
+databricks bundle run model_training_job -t test
+```
+
+**Step 4: Monitor Progress**
+- Check **Databricks Jobs UI** for workflow progress
+- Check **MLflow UI** for model registration and experiments  
+- Check **Serving Endpoints** for deployment status
+
+#### ✅ **Testing Checklist**
+
+**Training Validation:**
+- [ ] GPT-2 model downloads successfully from HuggingFace
+- [ ] Model logs to MLflow with transformers flavor
+- [ ] Model appears in Unity Catalog (`dev_testing_catalog.models`)
+- [ ] Task values (model_uri, model_name, model_version) are set correctly
+
+**Validation Testing:**
+- [ ] Model loads from registry successfully
+- [ ] Inference test passes with sample inputs
+- [ ] GenAI evaluation runs and produces metrics
+- [ ] "challenger" alias is assigned to model version
+- [ ] Evaluation metrics are logged to MLflow
+
+**Deployment Verification:**
+- [ ] Pre-deployment checks pass (model exists, loads correctly)
+- [ ] Serving endpoint creates/updates successfully
+- [ ] Endpoint reaches "READY" state within timeout
+- [ ] Model inference works via serving endpoint
+- [ ] "champion" alias set (if running in prod environment)
+- [ ] Model registry updated with endpoint information
+
+#### 🐛 **Troubleshooting**
+
+**Bundle Deployment Issues:**
+```bash
+# Check detailed error logs
+databricks bundle deploy -t test --verbose
+
+# Validate individual resource files
+databricks bundle validate --verbose
+```
+
+**Model Registration Issues:**
+- Check Unity Catalog permissions for `dev_testing_catalog` and `production_catalog`
+- Ensure catalogs and schemas exist: `dev_testing_catalog.models`, `production_catalog.models`
+- Verify MLflow registry URI is set to `databricks-uc`
+
+**Serving Endpoint Issues:**
+- Check endpoint logs in Databricks Serving UI
+- Verify model version exists and is accessible in Unity Catalog
+- Check compute resource availability and quotas
+- Ensure proper permissions for endpoint creation
+
+**Useful Debug Commands:**
+```bash
+# View bundle resources
+databricks bundle schema
+
+# Monitor job runs
+databricks jobs list-runs --job-id <job-id>
+
+# Check workspace files
+databricks workspace list /Workspace/Users/<your-username>
+```
+
+#### 🧪 **Testing Different Scenarios**
+
+**Test with Different Models:**
+Update `training/notebooks/Train.py`:
+```python
+# Replace "gpt2" with other HuggingFace models
+model_name_hf = "distilbert-base-uncased"  # or any transformer model
+```
+
+**Test Environment Promotion:**
+```bash
+# Test in development
+databricks bundle deploy -t test
+databricks bundle run model_training_job -t test
+
+# Promote to production
+databricks bundle deploy -t prod
+databricks bundle run model_training_job -t prod
+```
+
+The workflow can be triggered automatically on PR merge to main branch or run manually using the commands above.
 
 ## Next Steps
 
