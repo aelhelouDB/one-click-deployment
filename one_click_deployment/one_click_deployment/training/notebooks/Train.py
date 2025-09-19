@@ -22,11 +22,13 @@
 # COMMAND ----------
 
 import os
+
+
 notebook_path =  '/Workspace/' + os.path.dirname(dbutils.notebook.entry_point.getDbutils().notebook().getContext().notebookPath().get())
 
 # COMMAND ----------
 
-# MAGIC %pip install -r ../../requirements.txt
+# MAGIC %pip install uv -r ../../requirements.txt
 
 # COMMAND ----------
 
@@ -50,12 +52,12 @@ dbutils.widgets.text(
 )
 # Unity Catalog registered model name to use for the trained model.
 dbutils.widgets.text(
-    "model_name", "dev.one_click_deployment.tone_detection_model", label="Full (Three-Level) Model Name"
+    "model_name", "amine_elhelou_staging.one_click_deployment.tone_detection_model", label="Full (Three-Level) Model Name"
 )
 
 # Unity Catalog volume path for model artifacts
 dbutils.widgets.text(
-    "uc_volume_path", "/Volumes/dev/one_click_deployment/model_artifacts", label="Unity Catalog Volume Path"
+    "uc_volume_path", "/Volumes/amine_elhelou_staging/one_click_deployment/model_artifacts", label="Unity Catalog Volume Path"
 )
 
 # COMMAND ----------
@@ -69,6 +71,8 @@ uc_volume_path = dbutils.widgets.get("uc_volume_path")
 
 # DBTITLE 1, Set experiment
 import mlflow
+import os
+
 
 # Set environment variable to lock model dependencies
 os.environ["MLFLOW_LOCK_MODEL_DEPENDENCIES"] = "True"
@@ -84,6 +88,7 @@ import mlflow.transformers
 import torch
 import os
 import subprocess
+
 
 model_name_hf = "j-hartmann/emotion-english-distilroberta-base"
 print(f"Downloading {model_name_hf} from HuggingFace Hub...")
@@ -168,9 +173,14 @@ class ToneDetectionModel(mlflow.pyfunc.PythonModel):
 
 # COMMAND ----------
 
+# MAGIC %sql
+# MAGIC CREATE VOLUME IF NOT EXISTS amine_elhelou_staging.one_click_deployment.model_artifacts
+
+# COMMAND ----------
+
 # DBTITLE 1, Save model to Unity Catalog Volume
 # Create UC volume directory if it doesn't exist
-os.makedirs(uc_volume_path, exist_ok=True)
+dbutils.fs.mkdirs(uc_volume_path)
 model_artifact_path = os.path.join(uc_volume_path, "model")
 
 # Save model and tokenizer to UC volume
@@ -199,7 +209,7 @@ try:
     print("Successfully locked requirements with uv")
 except subprocess.CalledProcessError:
     print("Warning: uv not available, using basic requirements.txt")
-    
+
 # COMMAND ----------
 
 # DBTITLE 1, Log model with PyFunc wrapper
@@ -209,15 +219,17 @@ sample_input = pd.DataFrame({"text": ["I am feeling great today!", "This is terr
 # Create artifacts dictionary pointing to UC volume model
 artifacts = {"model": model_artifact_path}
 
-# Log the model with PyFunc wrapper
-mlflow.pyfunc.log_model(
-    artifact_path="tone_detection_model",
-    python_model=ToneDetectionModel(),
-    artifacts=artifacts,
-    input_example=sample_input,
-    registered_model_name=model_name,
-    pip_requirements=requirements_path
-)
+with mlflow.start_run(run_name="model-creation-baseline") as run:
+    # Log the model with PyFunc wrapper
+    mlflow.pyfunc.log_model(
+        name="tone_detection_model",
+        python_model=ToneDetectionModel(),
+        artifacts=artifacts,
+        input_example=sample_input,
+        registered_model_name=model_name,
+        pip_requirements=requirements_path
+    )
+
 
 # The returned model URI is needed by the model deployment notebook.
 model_version = get_latest_model_version(model_name)
@@ -227,3 +239,7 @@ dbutils.jobs.taskValues.set("model_name", model_name)
 dbutils.jobs.taskValues.set("model_version", model_version)
 dbutils.jobs.taskValues.set("uc_volume_path", uc_volume_path)
 dbutils.notebook.exit(model_uri)
+
+# COMMAND ----------
+
+
