@@ -1,15 +1,16 @@
 # Databricks notebook source
 ##################################################################################
-# Model Training Notebook (HuggingFace GPT-2)
+# Model Training Notebook (Distilled RoBERTa Tone Detection)
 #
-# This notebook downloads a pre-trained GPT-2 model from HuggingFace and logs it
-# to MLflow registry in the dev/testing catalog. This serves as a template for
-# model deployment/serving workflows.
+# This notebook downloads a pre-trained distilled RoBERTa model from HuggingFace,
+# wraps it in a PyFunc class for tone detection, saves model weights to Unity Catalog
+# volume, and logs it to MLflow registry with locked dependencies using uv.
 #
 # Parameters:
 # * env (required):                 - Environment the notebook is run in (test, or prod). Defaults to "test".
 # * model_name (required)           - Three-level name (<catalog>.<schema>.<model_name>) to register the model in Unity Catalog.
 # * experiment_name (required)      - MLflow experiment name for the training runs. Will be created if it doesn't exist.
+# * uc_volume_path (required)       - Unity Catalog volume path to save model artifacts.
 #  
 ##################################################################################
 
@@ -49,7 +50,12 @@ dbutils.widgets.text(
 )
 # Unity Catalog registered model name to use for the trained model.
 dbutils.widgets.text(
-    "model_name", "dev.one_click_deployment.one_click_deployment-model", label="Full (Three-Level) Model Name"
+    "model_name", "dev.one_click_deployment.tone_detection_model", label="Full (Three-Level) Model Name"
+)
+
+# Unity Catalog volume path for model artifacts
+dbutils.widgets.text(
+    "uc_volume_path", "/Volumes/dev/one_click_deployment/model_artifacts", label="Unity Catalog Volume Path"
 )
 
 # COMMAND ----------
@@ -57,35 +63,45 @@ dbutils.widgets.text(
 # DBTITLE 1,Define input and output variables
 experiment_name = dbutils.widgets.get("experiment_name")
 model_name = dbutils.widgets.get("model_name")
+uc_volume_path = dbutils.widgets.get("uc_volume_path")
 
 # COMMAND ----------
 
 # DBTITLE 1, Set experiment
 import mlflow
 
+# Set environment variable to lock model dependencies
+os.environ["MLFLOW_LOCK_MODEL_DEPENDENCIES"] = "True"
+
 mlflow.set_experiment(experiment_name)
 mlflow.set_registry_uri('databricks-uc')
 
 # COMMAND ----------
 
-# DBTITLE 1, Download GPT-2 model from HuggingFace
-from transformers import GPT2LMHeadModel, GPT2Tokenizer
+# DBTITLE 1, Download Distilled RoBERTa model from HuggingFace
+from transformers import AutoTokenizer, AutoModelForSequenceClassification
 import mlflow.transformers
+import torch
+import os
+import subprocess
 
-model_name_hf = "gpt2"
+model_name_hf = "j-hartmann/emotion-english-distilroberta-base"
 print(f"Downloading {model_name_hf} from HuggingFace Hub...")
 
-# Download model and tokenizer
-model = GPT2LMHeadModel.from_pretrained(model_name_hf)
-tokenizer = GPT2Tokenizer.from_pretrained(model_name_hf)
+# Download model and tokenizer for tone/emotion detection
+model = AutoModelForSequenceClassification.from_pretrained(model_name_hf)
+tokenizer = AutoTokenizer.from_pretrained(model_name_hf)
 
 print(f"Successfully downloaded {model_name_hf}")
+print(f"Model labels: {model.config.id2label}")
 
 # COMMAND ----------
 
-# DBTITLE 1, Helper function
+# DBTITLE 1, Helper functions and PyFunc wrapper
 from mlflow.tracking import MlflowClient
 import mlflow.pyfunc
+import pandas as pd
+import numpy as np
 
 
 def get_latest_model_version(model_name):
@@ -98,23 +114,109 @@ def get_latest_model_version(model_name):
     return latest_version
 
 
+class ToneDetectionModel(mlflow.pyfunc.PythonModel):
+    def load_context(self, context):
+        import torch
+        from transformers import AutoTokenizer, AutoModelForSequenceClassification
+        
+        # Load model from artifacts
+        model_path = os.path.join(context.artifacts["model"])
+        self.model = AutoModelForSequenceClassification.from_pretrained(model_path)
+        self.tokenizer = AutoTokenizer.from_pretrained(model_path)
+        self.model.eval()
+    
+    def predict(self, context, model_input):
+        import torch
+        import torch.nn.functional as F
+        
+        # Handle both string input and DataFrame input
+        if isinstance(model_input, pd.DataFrame):
+            texts = model_input.iloc[:, 0].tolist()  # Assume first column contains text
+        elif isinstance(model_input, (list, np.ndarray)):
+            texts = list(model_input)
+        else:
+            texts = [str(model_input)]
+        
+        results = []
+        for text in texts:
+            # Tokenize input
+            inputs = self.tokenizer(text, return_tensors="pt", truncation=True, padding=True, max_length=512)
+            
+            # Get predictions
+            with torch.no_grad():
+                outputs = self.model(**inputs)
+                probabilities = F.softmax(outputs.logits, dim=-1)
+                predicted_class_id = outputs.logits.argmax().item()
+                confidence = probabilities[0][predicted_class_id].item()
+                
+                predicted_label = self.model.config.id2label[predicted_class_id]
+                
+                results.append({
+                    "text": text,
+                    "predicted_tone": predicted_label,
+                    "confidence": confidence,
+                    "all_scores": {self.model.config.id2label[i]: prob.item() for i, prob in enumerate(probabilities[0])}
+                })
+        
+        return results
+
+
 # COMMAND ----------
 
 # MAGIC %md
-# MAGIC Log the downloaded GPT-2 model to MLflow with transformers flavor.
+# MAGIC Save model to Unity Catalog volume and log as PyFunc model to MLflow.
 
 # COMMAND ----------
 
-# DBTITLE 1, Log model and return output.
-# Create a sample input for the model signature
-sample_input = ["Hello, how are you?"]
+# DBTITLE 1, Save model to Unity Catalog Volume
+# Create UC volume directory if it doesn't exist
+os.makedirs(uc_volume_path, exist_ok=True)
+model_artifact_path = os.path.join(uc_volume_path, "model")
 
-# Log the model with transformers flavor
-mlflow.transformers.log_model(
-    transformers_model={"model": model, "tokenizer": tokenizer},
-    artifact_path="gpt2_model",
+# Save model and tokenizer to UC volume
+model.save_pretrained(model_artifact_path)
+tokenizer.save_pretrained(model_artifact_path)
+print(f"Model saved to Unity Catalog volume: {model_artifact_path}")
+
+# COMMAND ----------
+
+# DBTITLE 1, Lock requirements with uv
+# Generate requirements.txt with uv
+requirements_content = """torch>=2.0.0
+transformers>=4.21.0
+mlflow>=2.0.0
+pandas>=1.5.0
+numpy>=1.21.0
+"""
+
+requirements_path = os.path.join(uc_volume_path, "requirements.txt")
+with open(requirements_path, "w") as f:
+    f.write(requirements_content)
+
+# Use uv to lock requirements
+try:
+    subprocess.run(["uv", "pip", "compile", requirements_path, "-o", os.path.join(uc_volume_path, "requirements.lock")], check=True)
+    print("Successfully locked requirements with uv")
+except subprocess.CalledProcessError:
+    print("Warning: uv not available, using basic requirements.txt")
+    
+# COMMAND ----------
+
+# DBTITLE 1, Log model with PyFunc wrapper
+# Create sample input for the model signature
+sample_input = pd.DataFrame({"text": ["I am feeling great today!", "This is terrible news"]})
+
+# Create artifacts dictionary pointing to UC volume model
+artifacts = {"model": model_artifact_path}
+
+# Log the model with PyFunc wrapper
+mlflow.pyfunc.log_model(
+    artifact_path="tone_detection_model",
+    python_model=ToneDetectionModel(),
+    artifacts=artifacts,
     input_example=sample_input,
-    registered_model_name=model_name
+    registered_model_name=model_name,
+    pip_requirements=requirements_path
 )
 
 # The returned model URI is needed by the model deployment notebook.
@@ -123,4 +225,5 @@ model_uri = f"models:/{model_name}/{model_version}"
 dbutils.jobs.taskValues.set("model_uri", model_uri)
 dbutils.jobs.taskValues.set("model_name", model_name)
 dbutils.jobs.taskValues.set("model_version", model_version)
+dbutils.jobs.taskValues.set("uc_volume_path", uc_volume_path)
 dbutils.notebook.exit(model_uri)
